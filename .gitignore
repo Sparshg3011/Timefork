@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# Environment / local secrets
+.env
+
+# OS
+.DS_Store

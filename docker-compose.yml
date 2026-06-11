@@ -1,0 +1,24 @@
+services:
+  db:
+    image: postgres:16
+    container_name: timefork-db
+    environment:
+      POSTGRES_USER: timefork
+      POSTGRES_PASSWORD: timefork
+      POSTGRES_DB: timefork
+    ports:
+      # 5433 on the host so a local Postgres on 5432 can coexist.
+      - "${TIMEFORK_PG_PORT:-5433}:5432"
+    volumes:
+      # Runs once, on first boot with an empty data dir. Numbered so future
+      # migration files sort after it.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+      - timefork_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U timefork -d timefork"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  timefork_pgdata:
