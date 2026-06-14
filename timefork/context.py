@@ -12,6 +12,24 @@ import psycopg
 from .events import append_event, read_events
 
 
+class ReplayDivergenceError(Exception):
+    """On replay, the agent asked for something different from the diary.
+
+    Replay matches recorded answers to calls by position. If the code changed
+    between lives, position i no longer means the same call, so we refuse to
+    hand back a stale answer and fail loudly with a diff instead.
+    """
+
+    def __init__(self, seq: int, recorded: str, requested: str) -> None:
+        super().__init__(
+            f"replay diverged at seq {seq}: diary has {recorded}, "
+            f"code now wants {requested}"
+        )
+        self.seq = seq
+        self.recorded = recorded
+        self.requested = requested
+
+
 class Context:
     """An agent's only door to non-determinism.
 
@@ -34,10 +52,19 @@ class Context:
         i = self._cursor
         self._cursor += 1
 
-        # Replay: this step is already in the diary. Read the answer back and
-        # do not call the model -- the bill does not move.
+        # Replay: this step is already in the diary. Before trusting the
+        # recorded answer, check the code is asking the same question as last
+        # life -- otherwise the answer belongs to a different call, and handing
+        # it back would silently corrupt the run.
         if i < len(self._history):
-            return self._history[i].payload["response"]
+            recorded = self._history[i]
+            if recorded.type != "LLM_CALLED" or recorded.payload["prompt"] != prompt:
+                raise ReplayDivergenceError(
+                    i + 1,
+                    f'{recorded.type}({recorded.payload.get("prompt")!r})',
+                    f"LLM_CALLED({prompt!r})",
+                )
+            return recorded.payload["response"]
 
         # Live: first time through. Call the model, then record the answer
         # before returning, so a crash one line later cannot lose it.

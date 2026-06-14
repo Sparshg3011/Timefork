@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from timefork.context import Context
+from timefork.context import Context, ReplayDivergenceError
 from timefork.events import connect, create_run, read_events
 from timefork.mock_llm import MockLLM
 
@@ -46,6 +46,17 @@ def test_second_life_replays_with_no_new_calls(conn):
     assert brain2.calls == 0                     # nothing re-executed
     assert out2 == out1                          # identical output, from the diary
     assert len(read_events(conn, run_id)) == 3   # no duplicate events
+
+
+def test_replay_divergence_is_caught(conn):
+    run_id = create_run(conn, "agent", {})
+    asyncio.run(Context(conn, run_id, MockLLM(seed=1)).llm("alpha"))
+
+    # Resume, but the code now asks a different question at the same step.
+    ctx = Context(conn, run_id, MockLLM(seed=1))
+    with pytest.raises(ReplayDivergenceError) as info:
+        asyncio.run(ctx.llm("beta"))
+    assert info.value.seq == 1
 
 
 def test_partial_replay_then_continue(conn):
