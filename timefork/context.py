@@ -9,6 +9,7 @@ from typing import Any
 
 import psycopg
 
+from .crash import maybe_crash
 from .events import append_event, read_events
 
 
@@ -67,8 +68,12 @@ class Context:
             return recorded.payload["response"]
 
         # Live: first time through. Call the model, then record the answer
-        # before returning, so a crash one line later cannot lose it.
+        # before returning. The named crash points are no-ops unless a test
+        # asks for them; the gap between the call and the append is the danger
+        # window -- billed but not yet recorded.
+        maybe_crash("before_call", i + 1)
         response = await self._llm.complete(prompt)
+        maybe_crash("before_append", i + 1)
         append_event(
             self.conn,
             self.run_id,
@@ -76,4 +81,5 @@ class Context:
             "LLM_CALLED",
             {"prompt": prompt, "response": response},
         )
+        maybe_crash("after_append", i + 1)
         return response
