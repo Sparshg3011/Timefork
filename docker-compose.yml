@@ -13,6 +13,8 @@ services:
       # Runs once, on first boot with an empty data dir. Numbered so future
       # migration files sort after it.
       - ./db/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+      - ./db/002_completed_keys.sql:/docker-entrypoint-initdb.d/002_completed_keys.sql:ro
+      - ./db/003_counters.sql:/docker-entrypoint-initdb.d/003_counters.sql:ro
       - timefork_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U timefork -d timefork"]

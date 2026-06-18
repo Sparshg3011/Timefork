@@ -1,13 +1,15 @@
 """The replay context: record on a run's first life, replay on every life after.
 
-An agent reaches the outside world only through ctx.llm(). On the first life
-each call hits the model and is written to the diary. On a resumed life the
-recorded answers are read back in order and the model is never called again.
+An agent reaches the world only through ctx: ctx.llm() for the model (safe to
+re-run after a crash) and ctx.side_effect() for things that must happen exactly
+once (an email, a payment). The cursor walks the diary one event at a time --
+an llm() owns one event, a side_effect() owns two (intent + completion).
 """
 
-from typing import Any
+from typing import Any, Callable
 
 import psycopg
+from psycopg.types.json import Json
 
 from .crash import maybe_crash
 from .events import append_event, read_events
@@ -32,14 +34,9 @@ class ReplayDivergenceError(Exception):
 
 
 class Context:
-    """An agent's only door to non-determinism.
+    """An agent's only door to non-determinism and to the outside world.
 
-    Construction loads the run's diary. Each ctx.llm() call is the next command
-    in a deterministic sequence, and command i always owns event seq i+1 --
-    whether it is recorded for the first time or replayed from the diary.
-
-    `llm` is anything with `async complete(prompt) -> str` (the mock today, a
-    real model in Week 5).
+    `llm` is anything with `async complete(prompt) -> str`.
     """
 
     def __init__(self, conn: psycopg.Connection, run_id: str, llm: Any) -> None:
@@ -47,39 +44,84 @@ class Context:
         self.run_id = run_id
         self._llm = llm
         self._history = read_events(conn, run_id)  # everything recorded so far
-        self._cursor = 0                           # commands handled this life
+        self._cursor = 0  # index of the next event (to replay, or about to append)
+
+    # -- cursor helpers: the dense seq of the next event is always cursor + 1 --
+
+    def _replaying(self) -> bool:
+        return self._cursor < len(self._history)
+
+    def _replay_next(self, expected_type: str):
+        event = self._history[self._cursor]
+        if event.type != expected_type:
+            raise ReplayDivergenceError(event.seq, event.type, expected_type)
+        self._cursor += 1
+        return event
+
+    def _record(self, type: str, payload: dict) -> int:
+        seq = self._cursor + 1
+        append_event(self.conn, self.run_id, seq, type, payload)
+        self._cursor += 1
+        return seq
+
+    # -- agent-facing operations --
 
     async def llm(self, prompt: str) -> str:
-        i = self._cursor
-        self._cursor += 1
-
-        # Replay: this step is already in the diary. Before trusting the
-        # recorded answer, check the code is asking the same question as last
-        # life -- otherwise the answer belongs to a different call, and handing
-        # it back would silently corrupt the run.
-        if i < len(self._history):
-            recorded = self._history[i]
-            if recorded.type != "LLM_CALLED" or recorded.payload["prompt"] != prompt:
+        if self._replaying():
+            event = self._replay_next("LLM_CALLED")
+            if event.payload["prompt"] != prompt:
                 raise ReplayDivergenceError(
-                    i + 1,
-                    f'{recorded.type}({recorded.payload.get("prompt")!r})',
+                    event.seq,
+                    f"LLM_CALLED({event.payload['prompt']!r})",
                     f"LLM_CALLED({prompt!r})",
                 )
-            return recorded.payload["response"]
+            return event.payload["response"]
 
-        # Live: first time through. Call the model, then record the answer
-        # before returning. The named crash points are no-ops unless a test
-        # asks for them; the gap between the call and the append is the danger
-        # window -- billed but not yet recorded.
-        maybe_crash("before_call", i + 1)
+        maybe_crash("before_call", self._cursor + 1)
         response = await self._llm.complete(prompt)
-        maybe_crash("before_append", i + 1)
-        append_event(
-            self.conn,
-            self.run_id,
-            i + 1,
-            "LLM_CALLED",
-            {"prompt": prompt, "response": response},
-        )
-        maybe_crash("after_append", i + 1)
+        maybe_crash("before_append", self._cursor + 1)
+        self._record("LLM_CALLED", {"prompt": prompt, "response": response})
+        maybe_crash("after_append", self._cursor + 1)
         return response
+
+    async def side_effect(self, fn: Callable[[psycopg.Connection], Any]) -> Any:
+        """Run `fn` (a write on this connection) exactly once across crashes."""
+        # Phase 1 -- intent: record "about to act", committed before we act.
+        if self._replaying():
+            seq = self._replay_next("TOOL_INTENT").seq
+        else:
+            seq = self._cursor + 1
+            maybe_crash("before_intent", seq)
+            self._record("TOOL_INTENT", {"key": f"{self.run_id}-{seq}"})
+        key = f"{self.run_id}-{seq}"
+
+        # Phase 2 -- completion: recorded already means done; otherwise act once.
+        if self._replaying():
+            return self._replay_next("TOOL_COMPLETED").payload["result"]
+
+        maybe_crash("before_effect", seq + 1)
+        return self._perform_once(key, fn)
+
+    def _perform_once(self, key: str, fn: Callable) -> Any:
+        # The effect, the dedupe key, and the completion event all commit
+        # together, so a crash can never leave the effect done-but-unrecorded.
+        row = self.conn.execute(
+            "SELECT result FROM completed_keys WHERE idempotency_key = %s", (key,)
+        ).fetchone()
+        if row is not None:
+            result = row[0]  # already done in a past life; reuse the result
+        else:
+            result = fn(self.conn)
+            self.conn.execute(
+                "INSERT INTO completed_keys (idempotency_key, result) VALUES (%s, %s)",
+                (key, Json(result)),
+            )
+        self.conn.execute(
+            "INSERT INTO events (run_id, seq, type, payload) VALUES (%s, %s, %s, %s)",
+            (self.run_id, self._cursor + 1, "TOOL_COMPLETED",
+             Json({"key": key, "result": result})),
+        )
+        maybe_crash("before_commit", self._cursor + 1)
+        self.conn.commit()
+        self._cursor += 1
+        return result
