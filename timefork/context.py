@@ -100,7 +100,9 @@ class Context:
             return self._replay_next("TOOL_COMPLETED").payload["result"]
 
         maybe_crash("before_effect", seq + 1)
-        return self._perform_once(key, fn)
+        result = self._perform_once(key, fn)
+        maybe_crash("after_effect", seq + 1)
+        return result
 
     def _perform_once(self, key: str, fn: Callable) -> Any:
         # The effect, the dedupe key, and the completion event all commit
