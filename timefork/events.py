@@ -34,6 +34,16 @@ class UnknownRunError(Exception):
     """No run with this run_id exists."""
 
 
+class StaleFenceError(Exception):
+    """A worker's append was fenced out: its lease_token is no longer current,
+    so the run was reassigned (the worker is a presumed-dead 'zombie')."""
+
+    def __init__(self, run_id: str, lease_token: int) -> None:
+        super().__init__(f"stale lease token {lease_token} for run {run_id}")
+        self.run_id = run_id
+        self.lease_token = lease_token
+
+
 @dataclass(frozen=True)
 class Event:
     """One diary entry, read back from the log."""
@@ -61,18 +71,35 @@ def create_run(conn: psycopg.Connection, agent_name: str, input: dict[str, Any])
 
 
 def append_event(
-    conn: psycopg.Connection, run_id: str, seq: int, type: str, payload: dict[str, Any]
+    conn: psycopg.Connection,
+    run_id: str,
+    seq: int,
+    type: str,
+    payload: dict[str, Any],
+    lease_token: int | None = None,
 ) -> None:
     """Append entry `seq` to a run's diary.
 
-    The (run_id, seq) primary key makes a double-append impossible; we just
-    translate the database's refusal into a precise exception.
+    The (run_id, seq) primary key makes a double-append impossible. If
+    `lease_token` is given (a worker run), the insert is also FENCED: it lands
+    only if the token still matches the run's current lease_token, so a stale
+    (zombie) worker's write inserts nothing and is rejected.
     """
     try:
-        conn.execute(
-            "INSERT INTO events (run_id, seq, type, payload) VALUES (%s, %s, %s, %s)",
-            (run_id, seq, type, Json(payload)),
-        )
+        if lease_token is None:
+            conn.execute(
+                "INSERT INTO events (run_id, seq, type, payload) VALUES (%s, %s, %s, %s)",
+                (run_id, seq, type, Json(payload)),
+            )
+        else:
+            cur = conn.execute(
+                "INSERT INTO events (run_id, seq, type, payload, lease_token) "
+                "SELECT %s, %s, %s, %s, %s "
+                "WHERE EXISTS (SELECT 1 FROM runs WHERE run_id = %s AND lease_token = %s)",
+                (run_id, seq, type, Json(payload), lease_token, run_id, lease_token),
+            )
+            if cur.rowcount == 0:
+                raise StaleFenceError(run_id, lease_token)
         conn.commit()
     except psycopg.errors.UniqueViolation as exc:
         conn.rollback()

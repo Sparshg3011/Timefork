@@ -82,3 +82,11 @@ def sweep_expired(conn: psycopg.Connection) -> list[str]:
     ).fetchall()
     conn.commit()
     return [r[0] for r in rows]
+
+
+def read_lease_token(conn: psycopg.Connection, run_id: str) -> int:
+    """The run's current fencing token. A worker captures this at claim time and
+    stamps its appends with it; the database rejects appends with a stale one."""
+    return conn.execute(
+        "SELECT lease_token FROM runs WHERE run_id = %s", (run_id,)
+    ).fetchone()[0]
