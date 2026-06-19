@@ -37,9 +37,11 @@ def claim_run(conn: psycopg.Connection, worker_id: str, lease_seconds: int = 30)
         conn.commit()
         return None
     run_id = row[0]
+    # clock_timestamp() is the real wall-clock time; now() is the transaction's
+    # start time, which goes stale if an earlier read left a transaction open.
     conn.execute(
         "UPDATE runs SET status = 'running', lease_owner = %s, "
-        "lease_expiry = now() + make_interval(secs => %s), "
+        "lease_expiry = clock_timestamp() + make_interval(secs => %s), "
         "lease_token = lease_token + 1 "
         "WHERE run_id = %s",
         (worker_id, lease_seconds, run_id),
@@ -57,9 +59,26 @@ def heartbeat(
     reclaimed or already finished, the heartbeat fails and returns False.
     """
     cur = conn.execute(
-        "UPDATE runs SET lease_expiry = now() + make_interval(secs => %s) "
+        "UPDATE runs SET lease_expiry = clock_timestamp() + make_interval(secs => %s) "
         "WHERE run_id = %s AND lease_owner = %s AND status = 'running'",
         (lease_seconds, run_id, worker_id),
     )
     conn.commit()
     return cur.rowcount == 1
+
+
+def sweep_expired(conn: psycopg.Connection) -> list[str]:
+    """Requeue runs whose lease has lapsed -- their worker is presumed dead.
+
+    This is the entire failover mechanism: an expired lease goes back to
+    'queued' (owner cleared) so a healthy worker reclaims it and resumes from
+    the diary. lease_token is left untouched; the next claim bumps it, which is
+    what later fences out the presumed-dead worker. Returns the requeued ids.
+    """
+    rows = conn.execute(
+        "UPDATE runs SET status = 'queued', lease_owner = NULL, lease_expiry = NULL "
+        "WHERE status = 'running' AND lease_expiry < clock_timestamp() "
+        "RETURNING run_id"
+    ).fetchall()
+    conn.commit()
+    return [r[0] for r in rows]

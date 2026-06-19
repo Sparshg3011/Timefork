@@ -17,7 +17,7 @@ from timefork.queue import claim_run, enqueue_run, heartbeat
 
 def lease_state(conn, run_id):
     row = conn.execute(
-        "SELECT lease_owner, (lease_expiry < now()) AS expired "
+        "SELECT lease_owner, (lease_expiry < clock_timestamp()) AS expired "
         "FROM runs WHERE run_id = %s",
         (run_id,),
     ).fetchone()
