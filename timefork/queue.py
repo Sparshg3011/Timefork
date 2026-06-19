@@ -46,3 +46,20 @@ def claim_run(conn: psycopg.Connection, worker_id: str, lease_seconds: int = 30)
     )
     conn.commit()
     return run_id
+
+
+def heartbeat(
+    conn: psycopg.Connection, run_id: str, worker_id: str, lease_seconds: int = 30
+) -> bool:
+    """Extend a run's lease -- the worker's 'still alive' signal.
+
+    Only the current owner of a still-running run can extend it; if the run was
+    reclaimed or already finished, the heartbeat fails and returns False.
+    """
+    cur = conn.execute(
+        "UPDATE runs SET lease_expiry = now() + make_interval(secs => %s) "
+        "WHERE run_id = %s AND lease_owner = %s AND status = 'running'",
+        (lease_seconds, run_id, worker_id),
+    )
+    conn.commit()
+    return cur.rowcount == 1
