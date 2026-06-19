@@ -23,16 +23,29 @@ def enqueue_run(conn: psycopg.Connection, agent_name: str, input: dict) -> str:
     return run_id
 
 
-def claim_run(conn: psycopg.Connection, worker_id: str, lease_seconds: int = 30):
+def claim_run(
+    conn: psycopg.Connection,
+    worker_id: str,
+    lease_seconds: int = 30,
+    agent_name: str | None = None,
+):
     """Claim one queued run for this worker; return its id, or None if empty.
 
     The SELECT locks the chosen row and SKIP LOCKED hides rows other workers are
-    already claiming, so the same run is never handed to two workers.
+    already claiming, so the same run is never handed to two workers. An optional
+    agent_name restricts which runs this worker will pick up.
     """
-    row = conn.execute(
-        "SELECT run_id FROM runs WHERE status = 'queued' "
-        "ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1"
-    ).fetchone()
+    if agent_name is None:
+        row = conn.execute(
+            "SELECT run_id FROM runs WHERE status = 'queued' "
+            "ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1"
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT run_id FROM runs WHERE status = 'queued' AND agent_name = %s "
+            "ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
+            (agent_name,),
+        ).fetchone()
     if row is None:
         conn.commit()
         return None

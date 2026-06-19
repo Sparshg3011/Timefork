@@ -12,7 +12,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from .crash import maybe_crash
-from .events import append_event, read_events
+from .events import StaleFenceError, append_event, read_events
 
 
 class ReplayDivergenceError(Exception):
@@ -39,10 +39,19 @@ class Context:
     `llm` is anything with `async complete(prompt) -> str`.
     """
 
-    def __init__(self, conn: psycopg.Connection, run_id: str, llm: Any) -> None:
+    def __init__(
+        self,
+        conn: psycopg.Connection,
+        run_id: str,
+        llm: Any,
+        lease_token: int | None = None,
+    ) -> None:
         self.conn = conn
         self.run_id = run_id
         self._llm = llm
+        # When set (a worker run), every append is fenced with this token so a
+        # presumed-dead worker's writes are rejected. None = unfenced (direct).
+        self._lease_token = lease_token
         self._history = read_events(conn, run_id)  # everything recorded so far
         self._cursor = 0  # index of the next event (to replay, or about to append)
 
@@ -60,7 +69,7 @@ class Context:
 
     def _record(self, type: str, payload: dict) -> int:
         seq = self._cursor + 1
-        append_event(self.conn, self.run_id, seq, type, payload)
+        append_event(self.conn, self.run_id, seq, type, payload, self._lease_token)
         self._cursor += 1
         return seq
 
@@ -105,8 +114,18 @@ class Context:
         return result
 
     def _perform_once(self, key: str, fn: Callable) -> Any:
-        # The effect, the dedupe key, and the completion event all commit
-        # together, so a crash can never leave the effect done-but-unrecorded.
+        # If fenced, verify (and lock) the lease before acting, so a presumed-
+        # dead worker does nothing at all. The effect, the dedupe key, and the
+        # completion event then commit together.
+        if self._lease_token is not None:
+            held = self.conn.execute(
+                "SELECT 1 FROM runs WHERE run_id = %s AND lease_token = %s FOR UPDATE",
+                (self.run_id, self._lease_token),
+            ).fetchone()
+            if held is None:
+                self.conn.rollback()
+                raise StaleFenceError(self.run_id, self._lease_token)
+
         row = self.conn.execute(
             "SELECT result FROM completed_keys WHERE idempotency_key = %s", (key,)
         ).fetchone()
@@ -119,9 +138,10 @@ class Context:
                 (key, Json(result)),
             )
         self.conn.execute(
-            "INSERT INTO events (run_id, seq, type, payload) VALUES (%s, %s, %s, %s)",
+            "INSERT INTO events (run_id, seq, type, payload, lease_token) "
+            "VALUES (%s, %s, %s, %s, %s)",
             (self.run_id, self._cursor + 1, "TOOL_COMPLETED",
-             Json({"key": key, "result": result})),
+             Json({"key": key, "result": result}), self._lease_token or 0),
         )
         maybe_crash("before_commit", self._cursor + 1)
         self.conn.commit()
