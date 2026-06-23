@@ -7,12 +7,14 @@ fleet harness.
   python harness/worker.py <worker_id>
 """
 
+import os
 import sys
 
 from timefork.mock_llm import MockLLM
 from timefork.worker import run_worker
 
 AGENT = "fleet_job"
+LATENCY = float(os.environ.get("FLEET_LATENCY", "0.05"))  # per-step delay
 
 
 def bump(conn, name):
@@ -38,7 +40,7 @@ def main():
         worker_id,
         AGENT,
         job,
-        lambda: MockLLM(latency_s=0.05),
+        lambda: MockLLM(latency_s=LATENCY),
         lease_seconds=3,
         heartbeat_seconds=1.0,
         run_forever=True,
