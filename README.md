@@ -73,8 +73,12 @@ pip install -e ".[dev]"
 pytest                                       # the full suite, against the real Postgres
 python examples/03_record_and_replay.py      # a crashed run resumes for free
 python examples/11_fork.py                    # a fork reuses its prefix
+python examples/13_showcase.py                # a refund agent that pauses for human approval
 python bench/benchmarks.py                    # the numbers above
 ```
+
+The showcase agent runs on the mock brain out of the box; to point it at the real
+model, `pip install -e ".[showcase]"` and set `ANTHROPIC_API_KEY`.
 
 The CLI (time-travel debugging from the terminal):
 
@@ -82,6 +86,7 @@ The CLI (time-travel debugging from the terminal):
 timefork ls                                  # recent runs + lineage
 timefork fork RUN --at 39 --system-prompt new.txt   # rewind, patch, branch a new timeline
 timefork diff RUN_A RUN_B                     # side-by-side: shared prefix + first divergence
+timefork approve RUN                          # sign off a run paused at a human-approval gate
 ```
 
 The `kill -9` certificates (the proofs, run manually):
@@ -118,5 +123,7 @@ python harness/fleet.py zombie               # Fencing: a frozen-then-thawed zom
 ## Status
 
 Weeks 1–4 complete: resume, exactly-once side effects, the fault-tolerant fleet, and time travel.
-Week 5 (a thin dashboard, a real-LLM showcase agent) is in progress. Full curriculum in
+Week 5 adds a thin FastAPI dashboard, reproducible benchmarks, and a showcase refund agent that
+runs on a real model and **pauses for a human to approve** before any money moves — the wait is
+recorded in the diary, so it survives a crash like everything else. Full curriculum in
 [`ROADMAP.md`](ROADMAP.md).

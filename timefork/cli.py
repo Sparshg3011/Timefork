@@ -9,6 +9,7 @@
 import argparse
 from pathlib import Path
 
+from .context import grant_approval
 from .diff import _describe, diff_runs
 from .events import connect, read_events
 from .fork import children_of, fork_run
@@ -59,6 +60,13 @@ def cmd_fork(args):
     print(child_id)
 
 
+def cmd_approve(args):
+    with connect() as conn:
+        seq = grant_approval(conn, args.run, approved=not args.no)
+    verdict = "denied" if args.no else "approved"
+    print(f"{verdict} {args.run} (APPROVAL at seq {seq}); re-queued to resume")
+
+
 def cmd_diff(args):
     with connect() as conn:
         d = diff_runs(conn, args.a, args.b)
@@ -92,6 +100,11 @@ def main():
     p.add_argument("--system-prompt", help="file whose contents become the system_prompt patch")
     p.add_argument("--set", action="append", metavar="KEY=VALUE", help="a patch entry (repeatable)")
     p.set_defaults(func=cmd_fork)
+
+    p = sub.add_parser("approve", help="record a human decision on a paused run")
+    p.add_argument("run")
+    p.add_argument("--no", action="store_true", help="deny instead of approve")
+    p.set_defaults(func=cmd_approve)
 
     p = sub.add_parser("diff", help="diff two runs")
     p.add_argument("a")

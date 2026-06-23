@@ -15,6 +15,9 @@ dev = [
     "httpx>=0.27",
     "python-multipart>=0.0.9",
 ]
+showcase = [
+    "anthropic>=0.40",
+]
 
 [project.scripts]
 timefork = "timefork.cli:main"

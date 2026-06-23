@@ -18,6 +18,7 @@ services:
       - ./db/004_leases.sql:/docker-entrypoint-initdb.d/004_leases.sql:ro
       - ./db/005_fencing.sql:/docker-entrypoint-initdb.d/005_fencing.sql:ro
       - ./db/006_lineage.sql:/docker-entrypoint-initdb.d/006_lineage.sql:ro
+      - ./db/007_paused.sql:/docker-entrypoint-initdb.d/007_paused.sql:ro
       - timefork_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U timefork -d timefork"]

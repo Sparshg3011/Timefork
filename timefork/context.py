@@ -12,7 +12,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from .crash import maybe_crash
-from .events import StaleFenceError, append_event, read_events
+from .events import StaleFenceError, append_event, read_events, set_run_status
 
 
 class ReplayDivergenceError(Exception):
@@ -31,6 +31,20 @@ class ReplayDivergenceError(Exception):
         self.seq = seq
         self.recorded = recorded
         self.requested = requested
+
+
+class PausedForApproval(Exception):
+    """The agent reached an approval gate with no decision recorded yet.
+
+    The request is already durable in the diary, so the process is free to
+    exit. The run waits until a human records a decision (grant_approval),
+    then resumes and replays straight past the gate.
+    """
+
+    def __init__(self, run_id: str, question: str) -> None:
+        super().__init__(f"run {run_id} is awaiting approval: {question}")
+        self.run_id = run_id
+        self.question = question
 
 
 class Context:
@@ -165,3 +179,37 @@ class Context:
         self.conn.commit()
         self._cursor += 1
         return result
+
+    async def approval(self, question: str) -> bool:
+        """A durable human-in-the-loop gate (two events, like side_effect).
+
+        First life records the request and then stops; the process can die.
+        A human records the decision out of band (grant_approval); later lives
+        replay it. The wait lives in the diary, so it survives any crash.
+        """
+        self._apply_pending_patches()
+        # Phase 1 -- the request: commit the question so a human or a dashboard
+        # can see exactly what is awaiting sign-off.
+        if self._replaying():
+            self._replay_next("APPROVAL_REQUESTED")
+        else:
+            self._record("APPROVAL_REQUESTED", {"question": question})
+
+        # Phase 2 -- the decision: replay it if a human already answered;
+        # otherwise stop here and wait for one.
+        if self._replaying():
+            return self._replay_next("APPROVAL").payload["approved"]
+        raise PausedForApproval(self.run_id, question)
+
+
+def grant_approval(conn: psycopg.Connection, run_id: str, approved: bool) -> int:
+    """Record a human's decision for a paused run and make it resumable.
+
+    Appends an APPROVAL right after the APPROVAL_REQUESTED at the diary's tail,
+    then re-queues the run so the runner (or a worker) picks it up and replays
+    past the gate.
+    """
+    seq = len(read_events(conn, run_id)) + 1
+    append_event(conn, run_id, seq, "APPROVAL", {"approved": approved})
+    set_run_status(conn, run_id, "queued")
+    return seq

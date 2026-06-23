@@ -26,6 +26,10 @@ def _describe(e: Event | None) -> str | None:
         return f"PATCH_APPLIED {e.payload}"
     if e.type in ("TOOL_INTENT", "TOOL_COMPLETED"):
         return f"{e.type} {e.payload.get('key', '')}"
+    if e.type == "APPROVAL_REQUESTED":
+        return f"APPROVAL_REQUESTED {e.payload.get('question', '')}"
+    if e.type == "APPROVAL":
+        return f"APPROVAL {'yes' if e.payload.get('approved') else 'no'}"
     return e.type
 
 
