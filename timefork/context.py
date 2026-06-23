@@ -54,6 +54,7 @@ class Context:
         self._lease_token = lease_token
         self._history = read_events(conn, run_id)  # everything recorded so far
         self._cursor = 0  # index of the next event (to replay, or about to append)
+        self._config: dict = {}  # built up by PATCH_APPLIED events (forks)
 
     # -- cursor helpers: the dense seq of the next event is always cursor + 1 --
 
@@ -73,9 +74,25 @@ class Context:
         self._cursor += 1
         return seq
 
+    def _apply_pending_patches(self) -> None:
+        # PATCH_APPLIED events (injected by a fork) are not agent calls; apply
+        # them to the config as the cursor reaches them, transparently.
+        while (
+            self._cursor < len(self._history)
+            and self._history[self._cursor].type == "PATCH_APPLIED"
+        ):
+            self._config.update(self._history[self._cursor].payload)
+            self._cursor += 1
+
+    def config(self, key: str, default: Any = None) -> Any:
+        """Read a config value, as patched by any fork up to this point."""
+        self._apply_pending_patches()
+        return self._config.get(key, default)
+
     # -- agent-facing operations --
 
     async def llm(self, prompt: str) -> str:
+        self._apply_pending_patches()
         if self._replaying():
             event = self._replay_next("LLM_CALLED")
             if event.payload["prompt"] != prompt:
@@ -95,6 +112,7 @@ class Context:
 
     async def side_effect(self, fn: Callable[[psycopg.Connection], Any]) -> Any:
         """Run `fn` (a write on this connection) exactly once across crashes."""
+        self._apply_pending_patches()
         # Phase 1 -- intent: record "about to act", committed before we act.
         if self._replaying():
             seq = self._replay_next("TOOL_INTENT").seq
