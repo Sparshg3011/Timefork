@@ -47,3 +47,20 @@ def fork_run(conn: psycopg.Connection, parent_run_id: str, at_seq: int, patch: d
     )
     conn.commit()
     return child_id
+
+
+def parent_of(conn: psycopg.Connection, run_id: str):
+    """Return (parent_run_id, fork_seq) for a run, or (None, None) if it's a root."""
+    return conn.execute(
+        "SELECT parent_run_id, fork_seq FROM runs WHERE run_id = %s", (run_id,)
+    ).fetchone()
+
+
+def children_of(conn: psycopg.Connection, run_id: str) -> list[tuple[str, int]]:
+    """Return [(child_run_id, fork_seq), ...] -- the forks branched off this run."""
+    rows = conn.execute(
+        "SELECT run_id, fork_seq FROM runs WHERE parent_run_id = %s "
+        "ORDER BY fork_seq, created_at",
+        (run_id,),
+    ).fetchall()
+    return [(rid, fseq) for rid, fseq in rows]
