@@ -20,6 +20,16 @@ from timefork.context import Context, PausedForApproval, grant_approval
 from timefork.events import connect, create_run, read_events, set_run_status
 from timefork.mock_llm import MockLLM
 
+# Optionally load ANTHROPIC_API_KEY from a local .env (gitignored), so the real
+# model can run without exporting the key by hand. No-op without python-dotenv.
+try:
+    from dotenv import load_dotenv
+
+    # override=True so a key in .env wins over a stale/empty shell variable.
+    load_dotenv(override=True)
+except ImportError:
+    pass
+
 ORDER = {"id": "A-4471", "amount": 49.99, "reason": "item arrived damaged"}
 
 

@@ -17,6 +17,7 @@ dev = [
 ]
 showcase = [
     "anthropic>=0.40",
+    "python-dotenv>=1.0",
 ]
 
 [project.scripts]
