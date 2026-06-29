@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.benchmarks/
 .venv/
 
 # Environment / local secrets
