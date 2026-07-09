@@ -7,6 +7,10 @@ must pass before moving on.
 A **mock LLM** is used for all development and tests; a real LLM appears only in
 the Week 5 showcase. Postgres is the only infrastructure.
 
+This was the working plan, and it shipped. A few Week 5 stretch items were cut
+per the buffer policy — the dashboard's kill/retry buttons, the throughput-knee
+benchmark, and the demo video. Everything else below exists in the repo.
+
 ---
 
 ## Week 1 — Event log + replay (single machine)
