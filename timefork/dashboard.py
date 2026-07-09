@@ -11,8 +11,8 @@ from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .diff import _describe, diff_runs
-from .events import connect, read_events
-from .fork import children_of, fork_run
+from .events import UnknownRunError, connect, read_events
+from .fork import InvalidForkPointError, children_of, fork_run
 
 app = FastAPI(title="Timefork")
 
@@ -104,7 +104,11 @@ def show_run(run_id: str):
 def do_fork(run_id: str, at_seq: int = Form(...), key: str = Form(""), value: str = Form("")):
     patch = {key: value} if key else {}
     with connect() as conn:
-        child = fork_run(conn, run_id, at_seq, patch)
+        try:
+            child = fork_run(conn, run_id, at_seq, patch)
+        except (InvalidForkPointError, UnknownRunError) as exc:
+            body = f'<p>{escape(str(exc))}</p><p><a href="/run/{run_id}">back to the run</a></p>'
+            return HTMLResponse(_page("fork rejected", body), status_code=400)
     return RedirectResponse(f"/run/{child}", status_code=303)
 
 

@@ -7,7 +7,15 @@ deterministic and needs no paid API.
 
 import asyncio
 
-from timefork.context import Context, PausedForApproval, grant_approval
+import pytest
+
+from timefork.context import (
+    Context,
+    NotAwaitingApprovalError,
+    PausedForApproval,
+    ReplayDivergenceError,
+    grant_approval,
+)
 from timefork.events import connect, create_run, read_events, set_run_status
 from timefork.mock_llm import MockLLM
 
@@ -100,3 +108,33 @@ def test_denied_approval_skips_the_side_effect():
             "SELECT value FROM counters WHERE name = %s", (f"{run_id}:refund",)
         ).fetchone()
     assert refunded is None  # no money moved
+
+
+def test_a_changed_question_fails_loudly_instead_of_reusing_the_answer():
+    async def ask(ctx, question):
+        return await ctx.approval(question)
+
+    with connect() as conn:
+        run_id = create_run(conn, "refund", {})
+        with pytest.raises(PausedForApproval):
+            asyncio.run(ask(Context(conn, run_id, MockLLM(seed=1)), "refund $12?"))
+        grant_approval(conn, run_id, approved=True)
+
+        # The human said yes to $12 -- code asking $1200 must not inherit it.
+        with pytest.raises(ReplayDivergenceError):
+            asyncio.run(ask(Context(conn, run_id, MockLLM(seed=1)), "refund $1200?"))
+
+
+def test_double_approval_is_rejected():
+    async def ask(ctx):
+        return await ctx.approval("go?")
+
+    with connect() as conn:
+        run_id = create_run(conn, "refund", {})
+        with pytest.raises(PausedForApproval):
+            asyncio.run(ask(Context(conn, run_id, MockLLM(seed=1))))
+
+        grant_approval(conn, run_id, approved=True)
+        with pytest.raises(NotAwaitingApprovalError):
+            grant_approval(conn, run_id, approved=True)  # the second click
+        assert _types(run_id) == ["APPROVAL_REQUESTED", "APPROVAL"]  # not corrupted

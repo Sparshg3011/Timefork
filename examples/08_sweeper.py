@@ -25,7 +25,7 @@ def show(conn, run_id):
 def main():
     with connect() as conn:
         enqueue_run(conn, "agent", {})
-        run_id = claim_run(conn, "worker-A", lease_seconds=1)
+        run_id, _ = claim_run(conn, "worker-A", lease_seconds=1)
         print(f"worker-A claimed it:        {show(conn, run_id)}")
 
         print("worker-A dies; waiting 2s for the 1s lease to lapse...")
@@ -37,7 +37,7 @@ def main():
         # A healthy worker reclaims it (skipping any other queued runs).
         while True:
             got = claim_run(conn, "worker-B", lease_seconds=30)
-            if got == run_id or got is None:
+            if got is None or got[0] == run_id:
                 break
         print(f"worker-B reclaimed it:      {show(conn, run_id)}")
 

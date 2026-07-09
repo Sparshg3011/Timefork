@@ -9,10 +9,10 @@
 import argparse
 from pathlib import Path
 
-from .context import grant_approval
+from .context import NotAwaitingApprovalError, grant_approval
 from .diff import _describe, diff_runs
-from .events import connect, read_events
-from .fork import children_of, fork_run
+from .events import UnknownRunError, connect, read_events
+from .fork import InvalidForkPointError, children_of, fork_run
 
 
 def cmd_ls(args):
@@ -56,13 +56,19 @@ def cmd_fork(args):
         key, _, value = kv.partition("=")
         patch[key] = value
     with connect() as conn:
-        child_id = fork_run(conn, args.run, args.at, patch)
+        try:
+            child_id = fork_run(conn, args.run, args.at, patch)
+        except (InvalidForkPointError, UnknownRunError) as exc:
+            raise SystemExit(f"fork rejected: {exc}")
     print(child_id)
 
 
 def cmd_approve(args):
     with connect() as conn:
-        seq = grant_approval(conn, args.run, approved=not args.no)
+        try:
+            seq = grant_approval(conn, args.run, approved=not args.no)
+        except (NotAwaitingApprovalError, UnknownRunError) as exc:
+            raise SystemExit(f"approve rejected: {exc}")
     verdict = "denied" if args.no else "approved"
     print(f"{verdict} {args.run} (APPROVAL at seq {seq}); re-queued to resume")
 

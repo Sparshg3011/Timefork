@@ -25,9 +25,10 @@ def main():
         count = 0
         with connect() as conn:
             while True:
-                rid = claim_run(conn, name)
-                if rid is None:
+                got = claim_run(conn, name)  # (run_id, fencing token), or None
+                if got is None:
                     break
+                rid, _token = got
                 with lock:
                     claimed.setdefault(rid, []).append(name)
                 count += 1

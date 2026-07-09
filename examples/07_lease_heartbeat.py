@@ -27,7 +27,7 @@ def lease_state(conn, run_id):
 def main():
     with connect() as conn:
         enqueue_run(conn, "agent", {})
-        run_id = claim_run(conn, "worker-A", lease_seconds=2)
+        run_id, _token = claim_run(conn, "worker-A", lease_seconds=2)
         print(f"claimed by worker-A: {lease_state(conn, run_id)}")
 
         # A live worker heartbeats and stays fresh.

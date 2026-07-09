@@ -13,7 +13,7 @@ def _status_owner(conn, run_id):
 def test_sweeper_requeues_an_expired_lease():
     with connect() as conn:
         enqueue_run(conn, "agent", {})
-        run_id = claim_run(conn, "dead-worker", lease_seconds=30)
+        run_id, _ = claim_run(conn, "dead-worker", lease_seconds=30)
         # Force the lease into the past, as if the worker died.
         conn.execute(
             "UPDATE runs SET lease_expiry = now() - make_interval(secs => 5) "
@@ -30,7 +30,7 @@ def test_sweeper_requeues_an_expired_lease():
 def test_sweeper_leaves_a_fresh_lease_alone():
     with connect() as conn:
         enqueue_run(conn, "agent", {})
-        run_id = claim_run(conn, "live-worker", lease_seconds=30)
+        run_id, _ = claim_run(conn, "live-worker", lease_seconds=30)
 
         requeued = sweep_expired(conn)
         assert run_id not in requeued

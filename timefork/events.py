@@ -81,9 +81,10 @@ def append_event(
     """Append entry `seq` to a run's diary.
 
     The (run_id, seq) primary key makes a double-append impossible. If
-    `lease_token` is given (a worker run), the insert is also FENCED: it lands
-    only if the token still matches the run's current lease_token, so a stale
-    (zombie) worker's write inserts nothing and is rejected.
+    `lease_token` is given (a worker run), the insert is also FENCED: the runs
+    row is locked and the token checked in the same transaction as the insert,
+    so a stale (zombie) worker's write cannot land even during a concurrent
+    reclaim -- the reclaim's token bump waits for this lock or precedes it.
     """
     try:
         if lease_token is None:
@@ -92,14 +93,17 @@ def append_event(
                 (run_id, seq, type, Json(payload)),
             )
         else:
-            cur = conn.execute(
+            held = conn.execute(
+                "SELECT 1 FROM runs WHERE run_id = %s AND lease_token = %s FOR UPDATE",
+                (run_id, lease_token),
+            ).fetchone()
+            if held is None:
+                raise StaleFenceError(run_id, lease_token)  # rolled back below
+            conn.execute(
                 "INSERT INTO events (run_id, seq, type, payload, lease_token) "
-                "SELECT %s, %s, %s, %s, %s "
-                "WHERE EXISTS (SELECT 1 FROM runs WHERE run_id = %s AND lease_token = %s)",
-                (run_id, seq, type, Json(payload), lease_token, run_id, lease_token),
+                "VALUES (%s, %s, %s, %s, %s)",
+                (run_id, seq, type, Json(payload), lease_token),
             )
-            if cur.rowcount == 0:
-                raise StaleFenceError(run_id, lease_token)
         conn.commit()
     except psycopg.errors.UniqueViolation as exc:
         conn.rollback()

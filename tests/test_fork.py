@@ -2,9 +2,11 @@
 
 import asyncio
 
+import pytest
+
 from timefork.context import Context
 from timefork.events import connect, create_run, read_events
-from timefork.fork import fork_run
+from timefork.fork import InvalidForkPointError, fork_run
 from timefork.mock_llm import MockLLM
 
 
@@ -45,3 +47,26 @@ def test_fork_replays_the_prefix_for_free_and_diverges():
         assert child_brain.calls == 2          # steps 1-3 replayed free; only 4-5 paid
         assert child_out != parent_out         # the patch changed the ending
         assert len(read_events(conn, child_id)) == 6  # 3 copied + patch + 2 new
+
+
+async def llm_then_effect_agent(ctx):
+    # Diary: 1 LLM_CALLED, 2 TOOL_INTENT, 3 TOOL_COMPLETED.
+    await ctx.llm("decide")
+    await ctx.side_effect(lambda conn: {"ok": True})
+
+
+def test_fork_rejects_invalid_points():
+    with connect() as conn:
+        parent_id = create_run(conn, "agent", {})
+        asyncio.run(llm_then_effect_agent(Context(conn, parent_id, MockLLM(seed=1))))
+
+        with pytest.raises(InvalidForkPointError):
+            fork_run(conn, parent_id, 0, {})   # before the first step
+        with pytest.raises(InvalidForkPointError):
+            fork_run(conn, parent_id, 4, {})   # past the end of the diary
+        with pytest.raises(InvalidForkPointError):
+            fork_run(conn, parent_id, 2, {})   # splits the intent from its completion
+
+        # Clean boundaries still fork fine.
+        assert fork_run(conn, parent_id, 1, {})
+        assert fork_run(conn, parent_id, 3, {})

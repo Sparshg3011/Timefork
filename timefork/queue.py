@@ -28,12 +28,14 @@ def claim_run(
     worker_id: str,
     lease_seconds: int = 30,
     agent_name: str | None = None,
-):
-    """Claim one queued run for this worker; return its id, or None if empty.
+) -> tuple[str, int] | None:
+    """Claim one queued run for this worker; return (run_id, lease_token), or
+    None if the queue is empty.
 
     The SELECT locks the chosen row and SKIP LOCKED hides rows other workers are
-    already claiming, so the same run is never handed to two workers. An optional
-    agent_name restricts which runs this worker will pick up.
+    already claiming, so the same run is never handed to two workers. The bumped
+    fencing token is returned from the same transaction as the claim -- reading
+    it separately later could hand back someone else's newer token.
     """
     if agent_name is None:
         row = conn.execute(
@@ -52,15 +54,15 @@ def claim_run(
     run_id = row[0]
     # clock_timestamp() is the real wall-clock time; now() is the transaction's
     # start time, which goes stale if an earlier read left a transaction open.
-    conn.execute(
+    token = conn.execute(
         "UPDATE runs SET status = 'running', lease_owner = %s, "
         "lease_expiry = clock_timestamp() + make_interval(secs => %s), "
         "lease_token = lease_token + 1 "
-        "WHERE run_id = %s",
+        "WHERE run_id = %s RETURNING lease_token",
         (worker_id, lease_seconds, run_id),
-    )
+    ).fetchone()[0]
     conn.commit()
-    return run_id
+    return run_id, token
 
 
 def heartbeat(

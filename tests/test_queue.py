@@ -16,9 +16,10 @@ def test_skip_locked_prevents_double_claim():
     def worker(name):
         with connect() as conn:
             while True:
-                rid = claim_run(conn, name)
-                if rid is None:
+                got = claim_run(conn, name)
+                if got is None:
                     break
+                rid, _token = got
                 with lock:
                     claimed.setdefault(rid, []).append(name)
 

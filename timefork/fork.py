@@ -14,6 +14,12 @@ from psycopg.types.json import Json
 from .events import UnknownRunError
 
 
+class InvalidForkPointError(Exception):
+    """The requested at_seq cannot be forked at: out of range, or it would
+    split an operation (an intent without its completion, a question without
+    its answer) and leave the child a diary that can never replay."""
+
+
 def fork_run(conn: psycopg.Connection, parent_run_id: str, at_seq: int, patch: dict) -> str:
     """Fork `parent_run_id` at step `at_seq` into a new queued run, applying
     `patch` (e.g. {"system_prompt": "..."}). Returns the child run id.
@@ -24,8 +30,31 @@ def fork_run(conn: psycopg.Connection, parent_run_id: str, at_seq: int, patch: d
         "SELECT agent_name, input FROM runs WHERE run_id = %s", (parent_run_id,)
     ).fetchone()
     if parent is None:
+        conn.rollback()
         raise UnknownRunError(f"no run with id {parent_run_id}")
     agent_name, input = parent
+
+    # The fork point must be a real step, and a clean one: cutting right after
+    # a TOOL_INTENT or an APPROVAL_REQUESTED would copy half an operation, and
+    # the child's replay would meet the patch where the other half belongs.
+    total = conn.execute(
+        "SELECT count(*) FROM events WHERE run_id = %s", (parent_run_id,)
+    ).fetchone()[0]
+    if not 1 <= at_seq <= total:
+        conn.rollback()
+        raise InvalidForkPointError(
+            f"at_seq {at_seq} is out of range for run {parent_run_id} (1..{total})"
+        )
+    boundary = conn.execute(
+        "SELECT type FROM events WHERE run_id = %s AND seq = %s",
+        (parent_run_id, at_seq),
+    ).fetchone()[0]
+    if boundary in ("TOOL_INTENT", "APPROVAL_REQUESTED"):
+        conn.rollback()
+        raise InvalidForkPointError(
+            f"at_seq {at_seq} splits a {boundary} from its completion; "
+            f"fork one step earlier or later"
+        )
 
     child_id = str(uuid.uuid4())
     conn.execute(

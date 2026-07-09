@@ -103,7 +103,9 @@ def run_fleet(n_workers=3, n_jobs=15, timeout=60.0):
     return {"jobs": n_jobs, "workers": n_workers, "incomplete": incomplete, "bad": bad}
 
 
-def run_chaos(n_workers=4, n_jobs=40, kill_every=1.5, timeout=150.0, latency=None):
+def run_chaos(n_workers=4, n_jobs=40, kill_every=1.5, timeout=150.0, latency=0.2):
+    # A small per-step latency so a kill actually lands mid-job -- otherwise the
+    # queue can drain before the first SIGKILL and the certificate proves little.
     ids = _enqueue_jobs(n_jobs)
     num = [0]
 
@@ -143,6 +145,14 @@ def run_chaos(n_workers=4, n_jobs=40, kill_every=1.5, timeout=150.0, latency=Non
             "incomplete": incomplete, "bad": bad}
 
 
+def _events_with_token(run_id, token):
+    with connect() as conn:
+        return conn.execute(
+            "SELECT count(*) FROM events WHERE run_id = %s AND lease_token = %s",
+            (run_id, token),
+        ).fetchone()[0]
+
+
 def run_zombie():
     with connect() as conn:
         run_id = enqueue_run(conn, AGENT, {})
@@ -154,6 +164,7 @@ def run_zombie():
         token_a = read_lease_token(conn, run_id)
     time.sleep(0.15)               # let A get into its first (slow) step
     a.send_signal(signal.SIGSTOP)  # FREEZE A -- its heartbeat stops too
+    stale_before = _events_with_token(run_id, token_a)  # A's writes so far
 
     # A's lease lapses; sweep requeues; worker B reclaims and finishes.
     time.sleep(4.0)
@@ -169,10 +180,12 @@ def run_zombie():
     a.send_signal(signal.SIGCONT)
     time.sleep(2.0)
     after_thaw = sorted(_counters(run_id))
+    stale_after = _events_with_token(run_id, token_a)
 
     _terminate([a, b])
     return {"token_A": token_a, "token_B": token_b, "after_B": after_b,
             "after_thaw": after_thaw,
+            "stale_events_before": stale_before, "stale_events_after": stale_after,
             "completed": _statuses([run_id]).get(run_id) == "completed"}
 
 
@@ -187,11 +200,14 @@ def main():
               f"SIGKILLs -> {'ALL completed, every counter exactly 1' if ok else 'FAILED ' + str(s)}")
     elif arg == "zombie":
         z = run_zombie()
-        ok = z["completed"] and z["after_B"] == z["after_thaw"] == [1] * STEPS
+        ok = (z["completed"] and z["after_B"] == z["after_thaw"] == [1] * STEPS
+              and z["stale_events_after"] == z["stale_events_before"])
         print(f"zombie: A held token {z['token_A']}, B reclaimed with token {z['token_B']}")
         print(f"  counters after B finished: {z['after_B']}")
         print(f"  counters after thawing A:  {z['after_thaw']}")
-        print(f"  -> {'zombie fenced out, counters stayed exactly 1' if ok else 'FAILED ' + str(z)}")
+        print(f"  events written with A's stale token after the thaw: "
+              f"{z['stale_events_after'] - z['stale_events_before']}")
+        print(f"  -> {'zombie fenced out, appended nothing, counters stayed exactly 1' if ok else 'FAILED ' + str(z)}")
     else:
         nw = int(sys.argv[1]) if len(sys.argv) > 1 else 3
         nj = int(sys.argv[2]) if len(sys.argv) > 2 else 15

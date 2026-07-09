@@ -12,7 +12,13 @@ import psycopg
 from psycopg.types.json import Json
 
 from .crash import maybe_crash
-from .events import StaleFenceError, append_event, read_events, set_run_status
+from .events import (
+    DuplicateSequenceError,
+    StaleFenceError,
+    append_event,
+    read_events,
+    set_run_status,
+)
 
 
 class ReplayDivergenceError(Exception):
@@ -45,6 +51,15 @@ class PausedForApproval(Exception):
         super().__init__(f"run {run_id} is awaiting approval: {question}")
         self.run_id = run_id
         self.question = question
+
+
+class NotAwaitingApprovalError(Exception):
+    """grant_approval was called on a run whose diary is not waiting at an
+    approval gate -- e.g. it was already approved, or never paused at all."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"run {run_id} is not awaiting approval")
+        self.run_id = run_id
 
 
 class Context:
@@ -148,35 +163,42 @@ class Context:
     def _perform_once(self, key: str, fn: Callable) -> Any:
         # If fenced, verify (and lock) the lease before acting, so a presumed-
         # dead worker does nothing at all. The effect, the dedupe key, and the
-        # completion event then commit together.
-        if self._lease_token is not None:
-            held = self.conn.execute(
-                "SELECT 1 FROM runs WHERE run_id = %s AND lease_token = %s FOR UPDATE",
-                (self.run_id, self._lease_token),
-            ).fetchone()
-            if held is None:
-                self.conn.rollback()
-                raise StaleFenceError(self.run_id, self._lease_token)
+        # completion event then commit together; any failure rolls all of it
+        # back so the connection is left clean for the caller.
+        try:
+            if self._lease_token is not None:
+                held = self.conn.execute(
+                    "SELECT 1 FROM runs WHERE run_id = %s AND lease_token = %s FOR UPDATE",
+                    (self.run_id, self._lease_token),
+                ).fetchone()
+                if held is None:
+                    raise StaleFenceError(self.run_id, self._lease_token)
 
-        row = self.conn.execute(
-            "SELECT result FROM completed_keys WHERE idempotency_key = %s", (key,)
-        ).fetchone()
-        if row is not None:
-            result = row[0]  # already done in a past life; reuse the result
-        else:
-            result = fn(self.conn)
+            row = self.conn.execute(
+                "SELECT result FROM completed_keys WHERE idempotency_key = %s", (key,)
+            ).fetchone()
+            if row is not None:
+                result = row[0]  # already done in a past life; reuse the result
+            else:
+                result = fn(self.conn)
+                self.conn.execute(
+                    "INSERT INTO completed_keys (idempotency_key, result) VALUES (%s, %s)",
+                    (key, Json(result)),
+                )
             self.conn.execute(
-                "INSERT INTO completed_keys (idempotency_key, result) VALUES (%s, %s)",
-                (key, Json(result)),
+                "INSERT INTO events (run_id, seq, type, payload, lease_token) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (self.run_id, self._cursor + 1, "TOOL_COMPLETED",
+                 Json({"key": key, "result": result}), self._lease_token or 0),
             )
-        self.conn.execute(
-            "INSERT INTO events (run_id, seq, type, payload, lease_token) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (self.run_id, self._cursor + 1, "TOOL_COMPLETED",
-             Json({"key": key, "result": result}), self._lease_token or 0),
-        )
-        maybe_crash("before_commit", self._cursor + 1)
-        self.conn.commit()
+            maybe_crash("before_commit", self._cursor + 1)
+            self.conn.commit()
+        except psycopg.errors.UniqueViolation as exc:
+            self.conn.rollback()
+            raise DuplicateSequenceError(self.run_id, self._cursor + 1) from exc
+        except Exception:
+            self.conn.rollback()
+            raise
         self._cursor += 1
         return result
 
@@ -189,9 +211,17 @@ class Context:
         """
         self._apply_pending_patches()
         # Phase 1 -- the request: commit the question so a human or a dashboard
-        # can see exactly what is awaiting sign-off.
+        # can see exactly what is awaiting sign-off. On replay the recorded
+        # question must match what the code now asks -- a human's yes to one
+        # question must never be applied to a different one.
         if self._replaying():
-            self._replay_next("APPROVAL_REQUESTED")
+            event = self._replay_next("APPROVAL_REQUESTED")
+            if event.payload["question"] != question:
+                raise ReplayDivergenceError(
+                    event.seq,
+                    f"APPROVAL_REQUESTED({event.payload['question']!r})",
+                    f"APPROVAL_REQUESTED({question!r})",
+                )
         else:
             self._record("APPROVAL_REQUESTED", {"question": question})
 
@@ -207,9 +237,14 @@ def grant_approval(conn: psycopg.Connection, run_id: str, approved: bool) -> int
 
     Appends an APPROVAL right after the APPROVAL_REQUESTED at the diary's tail,
     then re-queues the run so the runner (or a worker) picks it up and replays
-    past the gate.
+    past the gate. Only valid while the diary actually ends on a request --
+    a second approval (or approving a run that never paused) is rejected
+    instead of corrupting the replay order.
     """
-    seq = len(read_events(conn, run_id)) + 1
+    events = read_events(conn, run_id)
+    if not events or events[-1].type != "APPROVAL_REQUESTED":
+        raise NotAwaitingApprovalError(run_id)
+    seq = len(events) + 1
     append_event(conn, run_id, seq, "APPROVAL", {"approved": approved})
     set_run_status(conn, run_id, "queued")
     return seq
